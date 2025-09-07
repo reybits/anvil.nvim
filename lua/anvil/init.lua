@@ -126,6 +126,7 @@ M.run = function(cmd, on_exit, flags)
                 vim.notify("Command completed successfully.", vim.log.levels.INFO)
             else
                 vim.notify("Command failed with exit code: " .. code, vim.log.levels.ERROR)
+                vim.cmd("copen")
             end
         end
 

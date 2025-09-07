@@ -27,16 +27,6 @@ To install this plugin, you can use your favorite Neovim package manager. For ex
         "Anvil",
     },
     opts = {
-        log_to_qf = false, -- Log output to quickfix list.
-
-        on_exit = function(code)
-            if code == 0 then
-                vim.notify("Build succeeded!", vim.log.levels.INFO)
-            else
-                vim.notify("Build failed with code: " .. code, vim.log.levels.ERROR)
-                vim.cmd("copen")
-            end
-        end,
     },
 }
 ```
@@ -47,6 +37,16 @@ The default configuration options are listed below:
 
 ```lua
 opts = {
+    log_to_qf = false, -- Log output to quickfix list.
+
+    on_exit = function(code)
+        if code == 0 then
+            vim.notify("Command completed successfully.", vim.log.levels.INFO)
+        else
+            vim.notify("Command failed with exit code: " .. code, vim.log.levels.ERROR)
+            vim.cmd("copen")
+        end
+    end,
 }
 ```
 
