@@ -152,7 +152,7 @@ M.run = function(cmd, on_exit, flags)
 
     if os.getenv("TMUX") then
         local tmux_cmd = makeTmuxCommand(cmd, logfile, pidfile, flags.log_to_qf)
-        vim.notify("CMD: " .. tmux_cmd, vim.log.levels.INFO)
+        -- vim.notify("CMD: " .. tmux_cmd, vim.log.levels.INFO)
         vim.fn.jobstart(tmux_cmd, { shell = true })
     else
         vim.api.nvim_create_autocmd("TermClose", {
