@@ -7,7 +7,7 @@ The plugin provides a smooth workflow for compiling, running, and monitoring bui
 
 ## Features:
 
-- Detect TMUX environment and open a new TMUX window for make command.
+- ~Detect TMUX environment and open a new TMUX window for make command.~
 - Write output to a quickfix list for easy navigation.
 
 ## Installation
@@ -37,14 +37,23 @@ The default configuration options are listed below:
 
 ```lua
 opts = {
-    log_to_qf = false, -- Log output to quickfix list.
+    log_to_qf = true,           -- Log output to quickfix list.
+    open_qf_on_success = false, -- Open quickfix window on success.
+    open_qf_on_error = true,    -- Open quickfix window on error.
+    close_on_success = true,    -- Close the terminal/tmux window on successful completion.
+    close_on_error = true,      -- Close the terminal/tmux window on error.
 
-    on_exit = function(code)
+    on_exit = function(code, o)
         if code == 0 then
             vim.notify("Command completed successfully.", vim.log.levels.INFO)
+            if o.open_qf_on_succes then
+                vim.cmd("copen")
+            end
         else
             vim.notify("Command failed with exit code: " .. code, vim.log.levels.ERROR)
-            vim.cmd("copen")
+            if o.open_qf_on_error then
+                vim.cmd("copen")
+            end
         end
     end,
 }
@@ -71,20 +80,20 @@ require('anvil').run()
 #### Equivalent to `:!ls`
 
 ```
-require('anvil').run("ls", nil, { log_to_qf = true })
+require('anvil').run("ls", { log_to_qf = true })
 ```
 
 #### Equivalent to `:make rule` with opening.
 
 ```
 require('anvil').run("make rule",
-     function(code)
+     on_error = function(code, 0)
          vim.notify("Result id: " .. code, vim.log.levels.INFO)
          if code ~= 0 then
              vim.cmd("copen")
          end
      end,
-     { log_to_qf = true })
+     log_to_qf = true })
 ```
 
 ## License

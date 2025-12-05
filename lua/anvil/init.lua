@@ -8,228 +8,244 @@
 
 local M = {}
 
----@class MakerunOpts
----@field pidfile string                Temporary file to write the exit code to
----@field logfile string                Output file for logging
----@field log_to_qf boolean             Whether to log output to quickfix list
----@field on_exit fun(code:number)|nil  Optional callback function
-local MakerunOpts = {
-    pidfile = "",
-    logfile = "",
+---@public
+---@class Options
+---@field mode? string                          Mode to run the command in: "auto" or "term".
+---@field log_to_qf? boolean                    Whether to log output to quickfix list.
+---@field open_qf_on_success? boolean           Whether to open quickfix list on successful completion.
+---@field open_qf_on_error? boolean             Whether to open quickfix list on error.
+---@field close_on_success? boolean             Whether to close the terminal window on successful completion.
+---@field close_on_error? boolean               Whether to close the terminal window on error.
+---@field title? string                         Title for the notification.
+---@field on_exit? fun(code:number, o?:Options) Optional callback function.
+M.options = {
+    mode = "term", -- "auto" | "term"
     log_to_qf = false,
-    on_exit = nil,
+    open_qf_on_success = false,
+    open_qf_on_error = false,
+    close_on_success = false,
+    close_on_error = false,
+    title = "Command",
+    on_exit = function(code, o)
+        local title = o.title or "Anvil"
+        if code == 0 then
+            vim.notify(title .. " completed successfully.", vim.log.levels.INFO)
+            if o.open_qf_on_success then
+                vim.cmd("copen")
+            end
+        else
+            vim.notify(title .. " failed with exit code: " .. code, vim.log.levels.ERROR)
+            if o.open_qf_on_error then
+                vim.cmd("copen")
+            end
+        end
+    end,
 }
+
+--------------------------------------------------------------------------------
 
 ---@private
 ---@type boolean Indicates whether a job is currently running.
 local isRunning = false
 
+---
+function M.isRunning()
+    return isRunning
+end
+
+---@private
+---@class JobOptions
+---@field pidfile string      Temporary file to write the exit code to.
+---@field logfile string      Output file for logging.
+---@field term_win number|nil Terminal window ID.
+---@field term_buf number|nil Terminal buffer ID.
+local JobOptions = {
+    pidfile = "",
+    logfile = "",
+    term_win = nil,
+    term_buf = nil,
+}
+
 ---Wait for the job to finish by polling the temporary file for the exit code.
----@param opts MakerunOpts Options for waiting for the job
-local function wait_for_job(opts)
+---@private
+---@param job_opts JobOptions Options for waiting for the job.
+---@param options Options     Plugin options.
+local function wait_for_job(job_opts, options)
     local timer = vim.uv.new_timer()
     if timer ~= nil then
-        timer:start(
-            500,
-            500,
-            vim.schedule_wrap(function()
-                local f = io.open(opts.pidfile, "r")
-                if f then
-                    -- Read the exit code from the temporary file.
-                    local code = tonumber(f:read("*a")) or 0
-                    f:close()
+        local function check_job_finish()
+            local f = io.open(job_opts.pidfile, "r")
+            if f then
+                -- read the exit code from the temporary file
+                local code = tonumber(f:read("*a")) or 0
+                f:close()
 
-                    -- Remove the temporary file.
-                    os.remove(opts.pidfile)
+                -- remove the temporary file
+                os.remove(job_opts.pidfile)
 
-                    -- Stop and close the timer.
-                    timer:stop()
-                    timer:close()
+                -- stop and close the timer
+                timer:stop()
+                timer:close()
 
-                    -- Forward the output to the quickfix list if needed.
-                    if opts.log_to_qf then
-                        local o = io.open(opts.logfile, "r")
-                        if o then
-                            local lines = {}
-                            for line in o:lines() do
-                                table.insert(lines, line)
-                            end
-                            o:close()
-                            os.remove(opts.logfile)
+                -- forward the output to the quickfix list if needed
+                if options.log_to_qf then
+                    local o = io.open(job_opts.logfile, "r")
+                    if o then
+                        local lines = {}
+                        for line in o:lines() do
+                            table.insert(lines, line)
+                        end
+                        o:close()
+                        os.remove(job_opts.logfile)
 
-                            vim.fn.setqflist({}, "r", { title = "Make Output", lines = lines })
+                        vim.fn.setqflist({}, "r", { title = "Make Output", lines = lines })
+                    end
+                end
+
+                -- close the terminal window if the job succeeded
+                if job_opts.term_win ~= nil and job_opts.term_buf ~= nil then
+                    if
+                        (code == 0 and options.close_on_success)
+                        or (code ~= 0 and options.close_on_error)
+                    then
+                        if vim.bo[job_opts.term_buf].buftype == "terminal" then
+                            vim.api.nvim_win_close(job_opts.term_win, true)
+                            vim.api.nvim_buf_delete(job_opts.term_buf, { force = true })
                         end
                     end
-
-                    -- Notify the user of the exit code.
-                    opts.on_exit(code)
-
-                    isRunning = false
                 end
-            end)
-        )
+
+                -- notify the user of the exit code
+                options.on_exit(code, options)
+
+                isRunning = false
+            end
+        end
+
+        timer:start(500, 500, vim.schedule_wrap(check_job_finish))
     end
 end
 
 --------------------------------------------------------------------------------
 
----Make a terminal command string.
----@param cmd string        Command to run
----@param logfile string    Output file for logging
----@param pidfile string    Temporary file to write exit code to
----@param log_to_qf boolean Whether to log output to quickfix list
----@return string
-local function makeTmuxCommand(cmd, logfile, pidfile, log_to_qf)
-    if log_to_qf == false then
-        return string.format(
-            "tmux split-window -v -l 30%% '%s; echo $? > %s || exec $SHELL'; tmux select-pane -U",
-            cmd,
-            pidfile
-        )
+M.shouldUseTmux = function(options)
+    if options.mode == "auto" then
+        return os.getenv("TMUX") ~= nil
+    elseif options.mode == "term" then
+        return false
     end
 
-    return string.format(
-        "tmux split-window -v -l 30%% '(%s 2>&1 | tee %s); echo $? > %s || exec $SHELL'; tmux select-pane -U",
-        cmd,
-        logfile,
-        pidfile
-    )
+    return false
 end
 
----Make a terminal command string.
----@param cmd string        Command to run
----@param logfile string    Output file for logging
----@param pidfile string    Temporary file to write exit code to
----@param log_to_qf boolean Whether to log output to quickfix list
----@return string
-local function makeTermCommand(cmd, logfile, pidfile, log_to_qf)
-    if log_to_qf == false then
-        return string.format("terminal %s; echo $? > %s", cmd, pidfile)
-    end
+--------------------------------------------------------------------------------
 
-    return string.format("terminal (%s 2>&1 | tee %s); echo $? > %s", cmd, logfile, pidfile)
+local function runInTmux(cmd, job_opts)
+    -- FIXME: Investigate how to grab user command exit code (not tee or shell) reliably in tmux pane.
+    local tmux_cmd = string.format(
+        "tmux split-window -v -l 30%% \"sh -c '{ %s 2>&1; echo $? >&3; } 3>%s | tee %s'\"; tmux select-pane -U",
+        cmd,
+        job_opts.pidfile,
+        job_opts.logfile
+    )
+    -- vim.notify("CMD: " .. tmux_cmd, vim.log.levels.INFO)
+
+    vim.fn.jobstart(tmux_cmd, { shell = true })
+end
+
+local function runInTerm(cmd, job_opts)
+    local prev_win = vim.api.nvim_get_current_win()
+
+    local term_cmd = string.format(
+        "terminal sh -c '{ %s 2>&1; echo $? >&3; } 3>%s | tee %s'",
+        cmd,
+        job_opts.pidfile,
+        job_opts.logfile
+    )
+    -- vim.notify("CMD: " .. term_cmd, vim.log.levels.INFO)
+
+    -- make split for terminal window and run terminal command
+    vim.cmd("split | " .. term_cmd)
+    job_opts.term_buf = vim.api.nvim_get_current_buf()
+    job_opts.term_win = vim.api.nvim_get_current_win()
+
+    -- scroll to the bottom
+    vim.cmd("normal G")
+
+    -- move terminal window to the bottom
+    vim.cmd("wincmd J")
+
+    -- reseize terminal window to fixed height
+    local height = math.floor(0.3 * vim.o.lines)
+    vim.cmd("resize " .. height)
+
+    -- return focus to previous window
+    if vim.api.nvim_win_is_valid(prev_win) then
+        vim.api.nvim_set_current_win(prev_win)
+    end
 end
 
 --------------------------------------------------------------------------------
 
 ---Run a Makefile rule asynchronously.
----@param cmd string|nil               The command or Make target to run. If nil, defaults to "make".
----@param on_exit fun(code:number)|nil Optional callback function called when the command exits. Receives the exit code as an argument.
----@param flags table|nil              Optional table of flags, e.g. { qf = true, open = false }.
-M.run = function(cmd, on_exit, flags)
-    -- Default command is "make"
+---@param cmd string|nil   The command or Make target to run. If nil, defaults to "make".
+---@param options? Options Optional table of options, e.g. { log_to_qf = true, mode = "auto", on_exit = funciton(code:number,title?:string) }.
+M.run = function(cmd, options)
+    -- default command is "make"
     cmd = cmd or "make"
-
-    on_exit = on_exit
-        or function(code)
-            if code == 0 then
-                vim.notify("Command completed successfully.", vim.log.levels.INFO)
-            else
-                vim.notify("Command failed with exit code: " .. code, vim.log.levels.ERROR)
-                vim.cmd("copen")
-            end
-        end
-
     -- vim.notify("'" .. vim.inspect(cmd) .. "'", vim.log.levels.INFO)
-    flags = flags or {}
     -- vim.print(vim.inspect(cmd))
-    -- vim.print(vim.inspect(flags))
+
+    options = vim.tbl_deep_extend("force", {}, M.options, options or {})
+    -- vim.notify("'" .. vim.inspect(options) .. "'", vim.log.levels.INFO)
+    -- vim.print(vim.inspect(options))
 
     if isRunning then
         vim.notify("A command is already running.", vim.log.levels.WARN)
         return
     end
 
+    local use_tmux = M.shouldUseTmux(options)
+
+    local job_opts = {
+        -- pidfile = vim.env.HOME .. "/out.pid",
+        -- logfile = vim.env.HOME .. "/out.log",
+        pidfile = vim.fn.tempname() .. ".pid",
+        logfile = vim.fn.tempname() .. ".log",
+    }
+
+    os.remove(job_opts.pidfile)
+    if options.log_to_qf then
+        os.remove(job_opts.logfile)
+    end
+
     isRunning = true
 
-    local pidfile = vim.fn.tempname() .. ".ret"
-    os.remove(pidfile)
-
-    local logfile = vim.fn.tempname() .. ".log"
-    if flags.log_to_qf then
-        os.remove(logfile)
-    end
-
-    if os.getenv("TMUX") then
-        local tmux_cmd = makeTmuxCommand(cmd, logfile, pidfile, flags.log_to_qf)
-        -- vim.notify("CMD: " .. tmux_cmd, vim.log.levels.INFO)
-        vim.fn.jobstart(tmux_cmd, { shell = true })
+    if use_tmux then
+        runInTmux(cmd, job_opts)
     else
-        vim.api.nvim_create_autocmd("TermClose", {
-            group = vim.api.nvim_create_augroup("scratch_close_term_buffer", { clear = true }),
-            callback = function()
-                for _, win in ipairs(vim.api.nvim_list_wins()) do
-                    local buf = vim.api.nvim_win_get_buf(win)
-                    if vim.bo[buf].buftype == "terminal" then
-                        vim.api.nvim_win_close(win, true)
-                        vim.api.nvim_buf_delete(buf, { force = true })
-                        return
-                    end
-                end
-            end,
-        })
-
-        local prev_win = vim.api.nvim_get_current_win()
-
-        -- make split for terminal window and run terminal command
-        local term_cmd = makeTermCommand(cmd, logfile, pidfile, flags.log_to_qf)
-        -- vim.notify("CMD: " .. term_cmd, vim.log.levels.INFO)
-        vim.cmd("split | " .. term_cmd)
-
-        -- scroll to the bottom
-        vim.cmd("normal G")
-
-        -- move terminal window to the bottom
-        vim.cmd("wincmd J")
-
-        -- reseize terminal window to fixed height
-        local height = math.floor(0.3 * vim.o.lines)
-        vim.cmd("resize " .. height)
-
-        -- return focus to previous window
-        if vim.api.nvim_win_is_valid(prev_win) then
-            vim.api.nvim_set_current_win(prev_win)
-        end
+        runInTerm(cmd, job_opts)
     end
 
-    -- Wait for the command to finish
-    wait_for_job({
-        pidfile = pidfile,
-        logfile = logfile,
-        log_to_qf = flags.log_to_qf,
-        on_exit = on_exit,
-    })
+    -- wait for the command to finish
+    wait_for_job(job_opts, options)
 end
 
---- Setup the plugin
-function M.setup(config)
-    config = config or {}
+--------------------------------------------------------------------------------
 
-    -- Bind commands to our lua functions
+--- Setup the plugin.
+function M.setup(options)
+    M.options = vim.tbl_deep_extend("force", M.options, options or {})
+
+    -- bind commands to our lua functions
     vim.api.nvim_create_user_command("Anvil", function(opts)
-        local targets = {}
-        local flags = {
-            log_to_qf = config.log_to_qf,
-        }
-
-        -- Parse arguments into targets and flags.
-        for _, arg in ipairs(opts.fargs) do
-            if arg:match("=") then
-                local k, v = arg:match("^([^=]+)=([^=]+)$")
-                if k and v then
-                    flags[k] = v
-                end
-            else
-                table.insert(targets, arg)
-            end
-        end
-
+        -- treat all arguments as a command and its arguments
         local cmd = nil
-        if #targets ~= 0 then
-            cmd = table.concat(targets, " ")
+        if #opts.fargs ~= 0 then
+            cmd = table.concat(opts.fargs, " ")
         end
 
-        M.run(cmd, config.on_exit, flags)
+        M.run(cmd, M.options)
     end, { nargs = "*", desc = "Run a command" })
 end
 
